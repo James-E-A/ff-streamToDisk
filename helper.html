@@ -1,0 +1,6 @@
+<link rel="modulepreload" src="./mod.mjs" />
+<script type="module">
+import { ensureServiceWorker, helper_onmessage } from './mod.mjs';
+await ensureServiceWorker();
+window.onmessage = helper_onmessage;
+</script>
