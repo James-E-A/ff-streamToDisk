@@ -1,0 +1,170 @@
+<html>
+<head>
+<link rel="preload" href="../mod.mjs" />
+</head>
+<body>
+<script type="module">
+import { showSaveFilePicker_sw } from '../mod.mjs';
+function showSaveFilePicker() {
+	return (window.showSaveFilePicker || showSaveFilePicker_sw)(...arguments);
+}
+
+class FooController {
+	#model;
+	#view;
+	constructor(model, view) {
+		this.#model = model;
+		this.#view = view;
+		view.addEventListener('record', (event) => this.#handleEvent(event));
+		view.addEventListener('resume', (event) => this.#handleEvent(event));
+		view.addEventListener('pause', (event) => this.#handleEvent(event));
+		view.addEventListener('stop', (event) => this.#handleEvent(event));
+		console.debug("Listening for events on: %o", view);
+	}
+
+	static createMVC() {
+		const model = new FooModel();
+		const view = FooView.fromScratch();
+		const result = new FooController(model, view);
+		return result.reify();
+	}
+
+	reify() {
+		return this.#view.root;
+	}
+
+	async #handleEvent(event) {
+		const view = this.#view;
+		try_else: {
+			try {
+				view.startPending(event.type);
+				const options = this.#parseOptions(event.target.options);
+				await this.#model[event.type](options);
+			} catch (error) {
+				console.error(error);
+				view.state = 'errored';
+				view.reason = error;
+				debugger;
+				break try_else;
+			}
+			view.state = event.name;
+		}
+	}
+
+	#parseOptions(options) {
+		if (!options.file) {
+			options.fileHandle = showSaveFilePicker(options);
+		}
+		return options;
+	}
+}
+
+class FooModel {
+	#mediaStream;
+	#mediaRecorder;
+	async record(options) {
+		const mic = this.#mediaStream || (this.#mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true }));
+		const recorder = new MediaRecorder(this.#mediaStream, options);
+		const blob_stream = new ReadableStream({
+			start: (controller) => {
+				if ( options.timeslice !== undefined ) {
+					recorder.start(timeslice)
+				} else {
+					recorder.start();
+				}
+				const abortController = new AbortController();
+				recorder.addEventListener('dataavailable', (event) => {controller.enqueue(event.data);}, { signal: abortController.signal });
+				recorder.addEventListener('stop', () => {abortController.abort(); controller.close();}, { signal: abortController.signal });
+				recorder.addEventListener('error', (event) => {abortController.abort(); controller.error(event.error);}, { signal: abortController.signal });
+			}
+		});
+		const byte_stream = blob_stream.pipeThrough(new TransformStream({
+			transform: async (chunk, controller) => {
+				chunk.enqueue(new Uint8Array(await chunk.araryBuffer()));
+			}
+		}));
+		const fileHandle = await options.fileHandle;
+		return byte_stream.pipeTo(fileHandle);
+	}
+	resume(options) {
+		this.#mediaRecorder.resume();
+	}
+	flush(options) {
+		this.#mediaRecorder.requestData();
+	}
+	pause(options) {
+		this.#mediaRecorder.pause();
+		if ( options.flush || (options.flush === undefined) )
+			this.flush(); // flush last partial chunk thru, in case the browser crashes while paused
+	}
+	stop(options) {
+		this.#mediaRecorder.stop();
+	}
+}
+
+class FooView extends EventTarget {
+	#form;
+
+	constructor(form) {
+		super();
+		this.#form = form;
+		form.addEventListener('submit', (event) => this.#handleSubmit(event));
+	}
+
+	startPending(eventType) {
+		// TODO put some fancy effect on the button that should "be" pending
+		this.#form.elements[eventType].disabled = true;
+	}
+
+	set state(value) {
+		switch (value) {
+			case 'recording':
+				this.#form.elements.record.disabled = true;
+				this.#form.elements.resume.disabled = true;
+				this.#form.elements.pause.disabled = false;
+				this.#form.elements.stop.disabled = false;
+				break;
+			case 'paused':
+				this.#form.elements.record.disabled = true;
+				this.#form.elements.resume.disabled = false;
+				this.#form.elements.pause.disabled = true;
+				this.#form.elements.stop.disabled = false;
+				break;
+			case 'stopped':
+				this.#form.elements.record.disabled = false;
+				this.#form.elements.resume.disabled = true;
+				this.#form.elements.pause.disabled = true;
+				this.#form.elements.stop.disabled = true;
+				break;
+			default:
+				throw new TypeError("unknown state");
+		}
+	}
+
+	#handleSubmit(event) {
+		const result = new Event(event.submitter.name);
+		result.options = Object.fromEntries((new FormData(event.target)).entries());
+		console.debug("Dispatching event on: %o", this);
+		this.dispatchEvent(result);
+
+		return (event.preventDefault(), true);
+	}
+}
+
+await new Promise((resolve) => {if ( document.readyState === 'complete' ) resolve(null); else window.addEventListener('load', (event) => {resolve(event);}, { once: true });});
+
+let controller = new FooController(
+	new FooModel(),
+	new FooView(document.forms[0])
+);
+
+</script>
+<form action="javascript:alert(new Error('unreachable'));">
+<input type="hidden" name="mimeType" value="audio/webm;codecs=%22opus%22" />
+<button type="submit" name="record">&#x23fa;</button>
+<button type="submit" name="resume" disabled>&#x25b6;</button>
+<button type="submit" name="pause" disabled>&#x23f8;</button>
+<button type="submit" name="stop" disabled>&#x23f9;</button>
+</form>
+</body>
+</html>
