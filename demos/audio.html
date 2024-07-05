@@ -148,27 +148,58 @@ class FooController {
 
 		this.#view.addEventListener('record', async (event) => {
 			this.#view.state = 'pending';
-			await this.#model.startRecording();
+			const detail = event.detail;
+			try {
+				let suggestedName = (detail.filename !== undefined) ? detail.filename : `Recording_${makeFilenameSafe(new Date())}`;
+				let mimeType = detail.mimeType;
+				await this.#model.startRecording({
+					mediaRecorderOpts: { mimeType },
+					saveFileOpts: { suggestedName, mimeType }
+				});
+			} catch (error) {
+				this.#view.state = 'errored';
+				this.#view.reason = error;
+				throw error;
+			}
 			this.#view.state = 'recording';
 		});
 
-		this.#view.addEventListener('resume', (event) => {
+		this.#view.addEventListener('resume', async (event) => {
 			this.#view.state = 'pending';
-			this.#model.resumeRecording();
+			try {
+				await this.#model.resumeRecording();
+			} catch (error) {
+				this.#view.state = 'errored';
+				this.#view.reason = error;
+				throw error;
+			}
 			this.#view.state = 'recording';
 		});
 
-		this.#view.addEventListener('pause', (event) => {
+		this.#view.addEventListener('pause', async (event) => {
 			this.#view.state = 'pending';
-			this.#model.pauseRecording();
+			try {
+				await this.#model.pauseRecording();
+			} catch (error) {
+				this.#view.state = 'errored';
+				this.#view.reason = error;
+				throw error;
+			}
 			this.#view.state = 'paused';
 		});
 
 		this.#view.addEventListener('stop', async (event) => {
 			this.#view.state = 'pending';
-			await this.#model.stopRecording();
+			try {
+				await this.#model.stopRecording();
+			} catch (error) {
+				this.#view.state = 'errored';
+				this.#view.reason = error;
+				throw error;
+			}
 			this.#view.state = 'stopped';
 		});
+
 	}
 }
 
@@ -230,5 +261,5 @@ new FooController(
 	new FooView(document.forms[0])
 );
 
-</script><form action="javascript:alert(new Error('unreachable'));"><input type="hidden" name="mimeType" value="audio/webm;codecs=&quot;opus&quot;" /><input type="hidden" name="timeslice" value="1000" /><button type="submit" name="record">&#x23fa;&#xfe0e;</button><button type="submit" name="resume" disabled>&#x25b6;&#xfe0e;</button><button type="submit" name="pause" disabled>&#x23f8;&#xfe0e;</button><button type="submit" name="stop" disabled>&#x23f9;&#xfe0e;</button></form></body>
+</script><form action="javascript:alert(new Error('unreachable'));"><input type="hidden" name="mimeType" value="audio/webm;codecs=&quot;opus&quot;" /><button type="submit" name="record">&#x23fa;&#xfe0e;</button><button type="submit" name="resume" disabled>&#x25b6;&#xfe0e;</button><button type="submit" name="pause" disabled>&#x23f8;&#xfe0e;</button><button type="submit" name="stop" disabled>&#x23f9;&#xfe0e;</button></form></body>
 </html>
