@@ -10,132 +10,6 @@ function showSaveFilePicker() {
 	return (window.showSaveFilePicker || showSaveFilePicker_sw)(...arguments);
 }
 
-class FooController {
-	#model;
-	#view;
-	constructor(model, view) {
-		this.#model = model;
-		this.#view = view;
-		view.addEventListener('record', (event) => this.#handleEvent(event));
-		view.addEventListener('resume', (event) => this.#handleEvent(event));
-		view.addEventListener('pause', (event) => this.#handleEvent(event));
-		view.addEventListener('stop', (event) => this.#handleEvent(event));
-		console.debug("Listening for events on: %o", view);
-	}
-
-	static createMVC() {
-		const model = new FooModel();
-		const view = FooView.fromScratch();
-		const result = new FooController(model, view);
-		return result.reify();
-	}
-
-	reify() {
-		return this.#view.root;
-	}
-
-	async #handleEvent(event) {
-		const view = this.#view;
-		const goalState = { record: 'recording', resume: 'recording', pause: 'paused', stop: 'stopped' }[event.type];
-		try_else: {
-			try {
-				view.startPending(event.type);
-				const options = {};
-
-				if ( event.type === 'record' ) {
-					if ( event.options.file ) {
-						options.fileHandle = event.options.file.files[0];
-					} else {
-						if (!options.suggestedName)
-							options.suggestedName = `Recording_${makeFilenameSafe(new Date())}.weba`;
-						options.fileHandle = showSaveFilePicker(options);
-					}
-					if ( typeof event.options.timeslice === 'string' )
-						options.timeslice = parseFloat(event.options.timeslice);
-				}
-
-				this.#model[event.type](options);
-
-			} catch (error) {
-				console.error(error);
-				view.state = 'errored';
-				view.reason = error;
-				debugger;
-				break try_else;
-			}
-			view.state = goalState;
-		}
-	}
-}
-
-class FooModel {
-	// Ways the recording could terminate:
-	// 1. User command
-	// 2. Writable stream dies (e.g. user cancels download, service worker crashes)
-	// 3. Mic is unplugged
-	// 4. Mic malfunctions
-	// 5. Parent document is aborted
-
-	#mediaRecorder;
-
-	async record(options) {
-		const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
-		const recorder = this.#mediaRecorder = new MediaRecorder(mic, options);
-		const blob_stream = new ReadableStream({
-			start: (controller) => {
-				console.debug("Starting: %o", recorder);
-				if ( options.timeslice !== undefined ) {
-					recorder.start(options.timeslice)
-				} else {
-					recorder.start();
-				}
-				const abortController = new AbortController();
-				recorder.addEventListener('dataavailable', (event) => {
-					controller.enqueue(event.data);
-				}, { signal: abortController.signal });
-				recorder.addEventListener('stop', () => {
-					abortController.abort();
-					controller.close();
-				}, { signal: abortController.signal });
-				recorder.addEventListener('error', (event) => {
-					// Halt case 4: mic malfunctions
-					abortController.abort();
-					controller.error(event.error);
-				}, { signal: abortController.signal });
-			},
-			cancel: (reason) => {
-				// Halt case 2: writable stream dies, which will propagate to this stream
-				recorder.stop();
-				
-				console.debug("Stopped: %o", recorder);
-			}
-		});
-		const byte_stream = blob_stream.pipeThrough(new TransformStream({
-			transform: async (chunk, controller) => {
-				controller.enqueue(new Uint8Array(await chunk.arrayBuffer()));
-			}
-		}));
-		const fileWritable = await options.fileHandle.then((h) => h.createWritable());
-		return byte_stream.pipeTo(fileWritable);
-	}
-	resume(options) {
-		this.#mediaRecorder.resume();
-	}
-	flush(options) {
-		this.#mediaRecorder.requestData();
-	}
-	pause(options) {
-		this.#mediaRecorder.pause();
-		if ( options.flush || (options.flush === undefined) )
-			this.flush(); // flush last partial chunk thru, in case the browser crashes while paused
-	}
-	stop(options) {
-		// Halt case 1: User command
-		this.#mediaRecorder.stop();
-		recorder.stream.getTracks().map((track) => track.stop());
-	}
-}
-
 class FooView extends EventTarget {
 	#form;
 
@@ -145,13 +19,14 @@ class FooView extends EventTarget {
 		form.addEventListener('submit', (event) => this.#handleSubmit(event));
 	}
 
-	startPending(eventType) {
-		// TODO put some fancy effect on the button that should "be" pending
-		this.#form.elements[eventType].disabled = true;
-	}
-
 	set state(value) {
 		switch (value) {
+			case 'pending':
+				this.#form.elements.record.disabled = true;
+				this.#form.elements.resume.disabled = true;
+				this.#form.elements.pause.disabled = true;
+				this.#form.elements.stop.disabled = true;
+				break;
 			case 'recording':
 				this.#form.elements.record.disabled = true;
 				this.#form.elements.resume.disabled = true;
@@ -184,13 +59,119 @@ class FooView extends EventTarget {
 
 	#handleSubmit(event) {
 		const result = new Event(event.submitter.name);
-		result.options = Object.fromEntries((new FormData(event.target)).entries());
-		console.debug("Dispatching event on: %o", this);
+		result.detail = Object.fromEntries((new FormData(event.target)).entries());
 		this.dispatchEvent(result);
 
 		return (event.preventDefault(), true);
 	}
 }
+
+
+class FooModel {
+	#recorder;
+
+	async startRecording(options) {
+		options = options || {};
+		const recorder = this.#recorder = await FooModel.#getMicRecorder(options.mediaRecorderOpts);
+		const in_r = (
+			new ReadableStream({
+				start: (controller) => {
+					recorder.ondataavailable = (event) => {
+						controller.enqueue(event.data);
+					};
+					recorder.onerror = (event) => {
+						// e.g. mic gets unplugged
+						controller.error(event.error);
+					};
+					recorder.onstop = (event) => {
+						controller.close();
+					};
+					// It's important QoL to start this immediately
+					// lest we lose important audio while waiting for the user to choose a file
+					recorder.start(1000);
+				},
+				//pull: (controller) => {
+				//	recorder.requestData();
+				//},
+				cancel: (reason) => {
+					// e.g. user cancels via the Downloads window
+					// e.g. serviceworker crashes
+					FooModel.#stopAndCleanUp(recorder);
+				}
+			})
+			.pipeThrough(new TransformStream({
+				transform: async (chunk, controller) => {
+					controller.enqueue(new Uint8Array(await chunk.arrayBuffer()));
+				}
+			}))
+		);
+		const out_w = await showSaveFilePicker(options.saveFileOpts).then((h) => h.createWritable());
+		return { result: in_r.pipeTo(out_w) }; // object to prevent Promise collapse when this function is awaited
+	}
+
+	stopRecording() {
+		// e.g. user manually stops recording
+		FooModel.#stopAndCleanUp(this.#recorder);
+	}
+
+	pauseRecording() {
+		this.#recorder.pause();
+	}
+
+	resumeRecording() {
+		this.#recorder.resume();
+	}
+
+	static async #getMicRecorder(mediaRecorderOpts) {
+		const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+		const recorder = new MediaRecorder(mic, mediaRecorderOpts);
+		return recorder;
+	}
+
+	static #stopAndCleanUp(recorder) {
+		if ( recorder.state !== 'inactive' ) 
+			recorder.stop();
+		recorder.stream.getTracks().forEach((track) => {
+			if ( track.readyState !== 'ended' )
+				track.stop();
+		});
+	}
+}
+
+
+class FooController {
+	#model;
+	#view;
+	constructor(model, view) {
+		this.#model = model;
+		this.#view = view;
+
+		this.#view.addEventListener('record', async (event) => {
+			this.#view.state = 'pending';
+			await this.#model.startRecording();
+			this.#view.state = 'recording';
+		});
+
+		this.#view.addEventListener('resume', (event) => {
+			this.#view.state = 'pending';
+			this.#model.resumeRecording();
+			this.#view.state = 'recording';
+		});
+
+		this.#view.addEventListener('pause', (event) => {
+			this.#view.state = 'pending';
+			this.#model.pauseRecording();
+			this.#view.state = 'paused';
+		});
+
+		this.#view.addEventListener('stop', async (event) => {
+			this.#view.state = 'pending';
+			await this.#model.stopRecording();
+			this.#view.state = 'stopped';
+		});
+	}
+}
+
 
 function makeFilenameSafe(date) {
 	const Y = date.getFullYear().toString().padStart(4, 0);
@@ -204,24 +185,37 @@ function makeFilenameSafe(date) {
 		[-60, 'A'],
 		[-120, 'B'],
 		[-180, 'C'],
+		[-210, 'C30'],
 		[-240, 'D'],
+		[-270, 'D30'],
 		[-300, 'E'],
+		[-330, 'E30'],
+		[-345, 'E45'],
 		[-360, 'F'],
+		[-390, 'F30'],
 		[-420, 'G'],
 		[-480, 'H'],
+		[-525, 'H45'],
 		[-540, 'I'],
+		[-570, 'I30'],
 		[-600, 'K'],
+		[-630, 'K30'],
 		[-660, 'L'],
 		[-720, 'M'],
+		[-765, 'M45'],
+		[-780, 'MA'],
+		[-840, 'MB'],
 		[60, 'N'],
 		[120, 'O'],
 		[180, 'P'],
+		[210, 'P30'],
 		[240, 'Q'],
 		[300, 'R'],
 		[360, 'S'],
 		[420, 'T'],
 		[480, 'U'],
 		[540, 'V'],
+		[570, 'V30'],
 		[600, 'W'],
 		[660, 'X'],
 		[720, 'Y'],
@@ -231,7 +225,7 @@ function makeFilenameSafe(date) {
 
 await new Promise((resolve) => {if ( document.readyState === 'complete' ) resolve(null); else window.addEventListener('load', (event) => {resolve(event);}, { once: true });});
 
-let controller = new FooController(
+new FooController(
 	new FooModel(),
 	new FooView(document.forms[0])
 );
