@@ -19,7 +19,7 @@ export async function showSaveFilePicker_sw(options) {
 	// 2. Get a download URL from helper
 	const [writableStream, downloadURL] = await new Promise((resolve, reject) => {
 		const { port1, port2 } = new MessageChannel();
-		let ready;
+		let ready, heartbeat;
 		const writable = new WritableStream({
 			start: async (controller) => {
 				ready = new Promise((resolve, reject) => {
@@ -35,31 +35,49 @@ export async function showSaveFilePicker_sw(options) {
 					const reason = new Error(`${Object.getPrototypeOf(event.target).constructor.name}: ${event.type} event`, { cause: event });
 					controller.error(reason);
 				};
+				console.debug("%o \u2192 %o", port2, helper);
 				helper.postMessage({
 					command: 'port_to_url',
 					suggestedName: options.suggestedName,
 					port: port2
 				}, { transfer: [port2], targetOrigin: new URL(import.meta.url).origin });
 				await ready;
+				heartbeat = setInterval(() => {
+					// https://bugzilla.mozilla.org/show_bug.cgi?id=1302715
+					// https://issues.chromium.org/issues/41293818
+					helper.postMessage({
+						command: 'heartbeat'
+					});
+				}, 25*1000);
 			},
 			write: (chunk, controller) => {
-				data_port1.postMessage({
+				console.debug("%o \u2192 %o", chunk, port1);
+				port1.postMessage({
 					value: chunk
 				}, [chunk.buffer]);
 			},
 			close: (controller) => {
-				data_port1.postMessage({
+				port1.postMessage({
 					done: true
-				})
+				});
+				clearInterval(heartbeat);
 			},
 			abort: (reason) => {
-				data_port1.postMessage({
+				port1.postMessage({
 					done: true,
 					error: reason.toString()
-				})
+				});
+				clearInterval(heartbeat);
 			}
 		});
-		ready.then((downloadURL) => {resolve([writable, downloadURL]);}, (reason) => {reject(reason);});
+		ready.then(
+			(downloadURL) => {
+				resolve([writable, downloadURL]);
+			},
+			(reason) => {
+				reject(reason);
+			}
+		);
 	});
 
 	// 3. Start download
@@ -139,12 +157,14 @@ export async function ensureServiceWorker() {
 
 
 export async function helper_onmessage(event) {
+	const sw = await ensureServiceWorker();
 	const message = event.data;
 	switch (message.command) {
 		case 'port_to_url':
 			{
 				const originalOrigin = event.origin;
 				const port = message.port;
+				console.debug("%o \u2190 %o", port, event.source);
 
 				if ( !(port instanceof MessagePort) ) {
 					console.error(new TypeError("port must be a MessagePort", { cause: { value: port, cause: event } }));
@@ -158,12 +178,20 @@ export async function helper_onmessage(event) {
 					return;
 				}
 
+				console.debug("%o \u2192 %o", port, sw);
 				sw.postMessage({
 					command: 'port_to_url',
 					port,
 					originalOrigin,
 					suggestedName,
 				}, { transfer: [port] });
+			}
+			break;
+		case 'heartbeat':
+			{
+				sw.postMessage({
+					command: 'heartbeat'
+				});
 			}
 			break;
 	}
@@ -209,7 +237,12 @@ export async function resolve_active_reg(reg) {
 }
 
 
-const downloadFrameRegistry = new FinalizationRegistry((frame) => {frame.parentNode.removeChild(frame);});
+function cleanupAfterDownload(heldObject) {
+	const { frame, heartbeatId } = heldObject;
+	frame.parentNode.removeChild(frame);
+}
+
+const downloadFrameRegistry = new FinalizationRegistry(cleanupAfterDownload);
 
 async function beginDownload(u, options) {
 	// Reliably downloads a (Content-Disposition: attachment) file without requiring transient user activation
@@ -233,7 +266,7 @@ async function beginDownload(u, options) {
 				downloadFrameRegistry.register(options.cleanup.target, frame);
 				break;
 			case 'settled':
-				Promise.resolve(options.cleanup.promise).finally(() => {frame.parentNode.removeChild(frame);});
+				Promise.resolve(options.cleanup.promise).finally(() => cleanupAfterDownload({ frame }));
 				break;
 			default:
 				throw new Error("unreachable", { cause: { 'function': beginDownload, 'arguments': arguments } });

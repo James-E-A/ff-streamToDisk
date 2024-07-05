@@ -4,8 +4,7 @@
 <link rel="modulepreload" href="../mod.mjs" />
 <link rel="preload" as="document" type="text/html" href="../helper.html" />
 </head>
-<body>
-<script type="module">
+<body><script type="module">
 import { showSaveFilePicker_sw } from '../mod.mjs';
 function showSaveFilePicker() {
 	return (window.showSaveFilePicker || showSaveFilePicker_sw)(...arguments);
@@ -37,11 +36,26 @@ class FooController {
 
 	async #handleEvent(event) {
 		const view = this.#view;
+		const goalState = { record: 'recording', resume: 'recording', pause: 'paused', stop: 'stopped' }[event.type];
 		try_else: {
 			try {
 				view.startPending(event.type);
-				const options = this.#parseOptions(event.options);
-				await this.#model[event.type](options);
+				const options = {};
+
+				if ( event.type === 'record' ) {
+					if ( event.options.file ) {
+						options.fileHandle = event.options.file.files[0];
+					} else {
+						if (!options.suggestedName)
+							options.suggestedName = `Recording_${makeFilenameSafe(new Date())}.weba`;
+						options.fileHandle = showSaveFilePicker(options);
+					}
+					if ( typeof event.options.timeslice === 'string' )
+						options.timeslice = parseFloat(event.options.timeslice);
+				}
+
+				this.#model[event.type](options);
+
 			} catch (error) {
 				console.error(error);
 				view.state = 'errored';
@@ -49,44 +63,60 @@ class FooController {
 				debugger;
 				break try_else;
 			}
-			view.state = event.name;
+			view.state = goalState;
 		}
-	}
-
-	#parseOptions(options) {
-		if (!options.file) {
-			options.fileHandle = showSaveFilePicker(options);
-		}
-		return options;
 	}
 }
 
 class FooModel {
-	#mediaStream;
+	// Ways the recording could terminate:
+	// 1. User command
+	// 2. Writable stream dies (e.g. user cancels download, service worker crashes)
+	// 3. Mic is unplugged
+	// 4. Mic malfunctions
+	// 5. Parent document is aborted
+
 	#mediaRecorder;
+
 	async record(options) {
-		const mic = this.#mediaStream || (this.#mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true }));
-		const recorder = new MediaRecorder(this.#mediaStream, options);
+		const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+		const recorder = this.#mediaRecorder = new MediaRecorder(mic, options);
 		const blob_stream = new ReadableStream({
 			start: (controller) => {
+				console.debug("Starting: %o", recorder);
 				if ( options.timeslice !== undefined ) {
-					recorder.start(timeslice)
+					recorder.start(options.timeslice)
 				} else {
 					recorder.start();
 				}
 				const abortController = new AbortController();
-				recorder.addEventListener('dataavailable', (event) => {controller.enqueue(event.data);}, { signal: abortController.signal });
-				recorder.addEventListener('stop', () => {abortController.abort(); controller.close();}, { signal: abortController.signal });
-				recorder.addEventListener('error', (event) => {abortController.abort(); controller.error(event.error);}, { signal: abortController.signal });
+				recorder.addEventListener('dataavailable', (event) => {
+					controller.enqueue(event.data);
+				}, { signal: abortController.signal });
+				recorder.addEventListener('stop', () => {
+					abortController.abort();
+					controller.close();
+				}, { signal: abortController.signal });
+				recorder.addEventListener('error', (event) => {
+					// Halt case 4: mic malfunctions
+					abortController.abort();
+					controller.error(event.error);
+				}, { signal: abortController.signal });
+			},
+			cancel: (reason) => {
+				// Halt case 2: writable stream dies, which will propagate to this stream
+				recorder.stop();
+				
+				console.debug("Stopped: %o", recorder);
 			}
 		});
 		const byte_stream = blob_stream.pipeThrough(new TransformStream({
 			transform: async (chunk, controller) => {
-				chunk.enqueue(new Uint8Array(await chunk.araryBuffer()));
+				controller.enqueue(new Uint8Array(await chunk.arrayBuffer()));
 			}
 		}));
-		const fileHandle = await options.fileHandle;
-		return byte_stream.pipeTo(fileHandle);
+		const fileWritable = await options.fileHandle.then((h) => h.createWritable());
+		return byte_stream.pipeTo(fileWritable);
 	}
 	resume(options) {
 		this.#mediaRecorder.resume();
@@ -100,7 +130,9 @@ class FooModel {
 			this.flush(); // flush last partial chunk thru, in case the browser crashes while paused
 	}
 	stop(options) {
+		// Halt case 1: User command
 		this.#mediaRecorder.stop();
+		recorder.stream.getTracks().map((track) => track.stop());
 	}
 }
 
@@ -138,6 +170,13 @@ class FooView extends EventTarget {
 				this.#form.elements.pause.disabled = true;
 				this.#form.elements.stop.disabled = true;
 				break;
+			case 'errored':
+				this.state = 'stopped';
+				queueMicrotask(() => {
+					console.error(this.reason);
+					alert(this.reason);
+				});
+				break;
 			default:
 				throw new TypeError("unknown state");
 		}
@@ -153,6 +192,43 @@ class FooView extends EventTarget {
 	}
 }
 
+function makeFilenameSafe(date) {
+	const Y = date.getFullYear().toString().padStart(4, 0);
+	const m = (date.getMonth()+1).toString().padStart(2, 0);
+	const d = date.getDate().toString().padStart(2, 0);
+	const H = date.getHours().toString().padStart(2, 0);
+	const M = date.getMinutes().toString().padStart(2, 0);
+	const S = date.getSeconds().toString().padStart(2, 0);
+	const Z = new Map([
+		[0, 'Z'],
+		[-60, 'A'],
+		[-120, 'B'],
+		[-180, 'C'],
+		[-240, 'D'],
+		[-300, 'E'],
+		[-360, 'F'],
+		[-420, 'G'],
+		[-480, 'H'],
+		[-540, 'I'],
+		[-600, 'K'],
+		[-660, 'L'],
+		[-720, 'M'],
+		[60, 'N'],
+		[120, 'O'],
+		[180, 'P'],
+		[240, 'Q'],
+		[300, 'R'],
+		[360, 'S'],
+		[420, 'T'],
+		[480, 'U'],
+		[540, 'V'],
+		[600, 'W'],
+		[660, 'X'],
+		[720, 'Y'],
+	]).get(date.getTimezoneOffset(), 'J');
+	return `${Y}${m}${d}T${H}${M}${S}${Z}`;
+}
+
 await new Promise((resolve) => {if ( document.readyState === 'complete' ) resolve(null); else window.addEventListener('load', (event) => {resolve(event);}, { once: true });});
 
 let controller = new FooController(
@@ -160,7 +236,5 @@ let controller = new FooController(
 	new FooView(document.forms[0])
 );
 
-</script>
-<form action="javascript:alert(new Error('unreachable'));"><input type="hidden" name="mimeType" value="audio/webm;codecs=&quot;opus&quot;" /><button type="submit" name="record">&#x23fa;&#xfe0e;</button><button type="submit" name="resume" disabled>&#x25b6;&#xfe0e;</button><button type="submit" name="pause" disabled>&#x23f8;&#xfe0e;</button><button type="submit" name="stop" disabled>&#x23f9;&#xfe0e;</button></form>
-</body>
+</script><form action="javascript:alert(new Error('unreachable'));"><input type="hidden" name="mimeType" value="audio/webm;codecs=&quot;opus&quot;" /><input type="hidden" name="timeslice" value="1000" /><button type="submit" name="record">&#x23fa;&#xfe0e;</button><button type="submit" name="resume" disabled>&#x25b6;&#xfe0e;</button><button type="submit" name="pause" disabled>&#x23f8;&#xfe0e;</button><button type="submit" name="stop" disabled>&#x23f9;&#xfe0e;</button></form></body>
 </html>

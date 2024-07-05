@@ -14,6 +14,7 @@ onmessage = (event) => {
 				const originalOrigin = message.originalOrigin;
 				const port = message.port;
 				const suggestedName = message.suggestedName;
+				const mimeType = message.mimeType;
 
 				let downloadURL;
 				const readable = new ReadableStream({
@@ -34,7 +35,7 @@ onmessage = (event) => {
 						};
 						port.postMessage({
 							ok: true,
-							value: downloadURL
+							result: downloadURL
 						});
 					},
 					cancel: (reason) => {
@@ -43,11 +44,11 @@ onmessage = (event) => {
 						});
 					}
 				});
-				streams.set(downloadURL, readableStream);
+				streams.set(downloadURL, [readable, mimeType]);
 
 				setTimeout(() => {
 					if ( streams.has(downloadURL) ) {
-						console.warn("Dropping abandoned stream %o (requested by %s)", streams.get(downloadURL), originalOrigin);
+						console.warn("Dropping abandoned stream %o (requested by %s)", streams.get(downloadURL)[0], originalOrigin);
 						streams.delete(downloadURL);
 					}
 				}, DELAY_X_LONG);
@@ -60,8 +61,11 @@ onmessage = (event) => {
 onfetch = (event) => {
 	const url = event.request.url;
 	if ( streams.has(url) ) {
-		const readableStream = streams.get(url);
-		event.respondWith(new Response(readableStream, { headers: { 'Content-Disposition': 'attachment' } }));
+		const [readable, type] = streams.get(url);
+		event.respondWith(new Response(readable, { headers: {
+			'Content-Disposition': 'attachment',
+			'Content-Type': (type !== undefined) ? type : 'application/octet-stream'
+		} }));
 		streams.delete(url);
 	}
 }

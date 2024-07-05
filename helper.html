@@ -4,7 +4,9 @@
 <link rel="modulepreload" href="./mod.mjs" />
 <link rel="modulepreload" as="serviceworker" href="./sw.js" />
 <script type="module">
-import { ensureServiceWorker, helper_onmessage } from './mod.mjs';
-await ensureServiceWorker();
+import { helper_onmessage } from './mod.mjs';
 window.onmessage = helper_onmessage;
 </script>
+</head>
+<body></body>
+</html>
