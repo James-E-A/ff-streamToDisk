@@ -9,20 +9,41 @@ const streams = new Map();
 onmessage = (event) => {
 	const message = event.data;
 	switch (message.command) {
-		case 'stream_to_url':
+		case 'port_to_url':
 			{
-				const readableStream = message.readableStream;
-				const suggestedName = message.suggestedName;
 				const originalOrigin = message.originalOrigin;
-				const replyPort = message.replyPort;
+				const port = message.port;
+				const suggestedName = message.suggestedName;
 
-				const downloadURL = makeDownloadURL(suggestedName);
-				streams.set(downloadURL, readableStream);
-
-				replyPort.postMessage({
-					ok: true,
-					value: downloadURL
+				let downloadURL;
+				const readable = new ReadableStream({
+					start: (controller) => {
+						downloadURL = makeDownloadURL(suggestedName);
+						port.onmessage = (event) => {
+							const message = event.data;
+							if ( !message.done ) {
+								controller.enqueue(message.value);
+							} else {
+								if ( !message.error ) {
+									controller.close();
+								} else {
+									controller.error(message.error);
+								}
+								port.close();
+							}
+						};
+						port.postMessage({
+							ok: true,
+							value: downloadURL
+						});
+					},
+					cancel: (reason) => {
+						port.postMessage({
+							error: `cancelled (${reason.toString()})`
+						});
+					}
 				});
+				streams.set(downloadURL, readableStream);
 
 				setTimeout(() => {
 					if ( streams.has(downloadURL) ) {
@@ -30,11 +51,11 @@ onmessage = (event) => {
 						streams.delete(downloadURL);
 					}
 				}, DELAY_X_LONG);
-
 			}
 			break;
 	}
 }
+
 
 onfetch = (event) => {
 	const url = event.request.url;

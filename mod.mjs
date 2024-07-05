@@ -11,34 +11,61 @@ export async function showSaveFilePicker_sw(options) {
 	// (+) works on Firefox
 	// (-) needs to be online the first time it's run
 	// (-) doesn't support seeking, truncation, or updating existing data
+	options ||= {};
 
+	// 1. Ensure helper daemon is loaded
 	const helper = await ensureHelper();
 
+	// 2. Get a download URL from helper
 	const [writableStream, downloadURL] = await new Promise((resolve, reject) => {
-		const { readable, writable } = new TransformStream();
 		const { port1, port2 } = new MessageChannel();
-		port1.onmessage = (event) => {
-			const message = event.data;
-			if (message.ok) {
-				resolve([writable, message.value]);
-			} else {
-				reject(new Error(message.message, message.cause ? { cause: message.cause } : undefined));
+		let ready;
+		const writable = new WritableStream({
+			start: async (controller) => {
+				ready = new Promise((resolve, reject) => {
+					port1.onmessage = (event) => {
+						if (event.data.ok) {
+							resolve(event.data.result);
+						} else {
+							controller.error(event.data.error);
+						}
+					};
+				});
+				port1.onmessageerror = (event) => {
+					const reason = new Error(`${Object.getPrototypeOf(event.target).constructor.name}: ${event.type} event`, { cause: event });
+					controller.error(reason);
+				};
+				helper.postMessage({
+					command: 'port_to_url',
+					suggestedName: options.suggestedName,
+					port: port2
+				}, { transfer: [port2], targetOrigin: new URL(import.meta.url).origin });
+				await ready;
+			},
+			write: (chunk, controller) => {
+				data_port1.postMessage({
+					value: chunk
+				}, [chunk.buffer]);
+			},
+			close: (controller) => {
+				data_port1.postMessage({
+					done: true
+				})
+			},
+			abort: (reason) => {
+				data_port1.postMessage({
+					done: true,
+					error: reason.toString()
+				})
 			}
-			event.target.close();
-		};
-		port1.onmessageerror = (event) => {
-			reject(new Error(`${Object.getPrototypeOf(event.target).constructor.name}: ${event.type} event`, { cause: event }));
-			event.target.close();
-		};
-		helper.postMessage({
-			command: 'stream_to_url',
-			readableStream: readable,
-			replyPort: port2,
-		}, { transfer: [readable, port2], targetOrigin: new URL(import.meta.url).origin });
+		});
+		ready.then((downloadURL) => {resolve([writable, downloadURL]);}, (reason) => {reject(reason);});
 	});
 
-	const downloadBegun = beginDownload(downloadURL, { finalizationTarget: writableStream });
+	// 3. Start download
+	const downloadBegun = beginDownload(downloadURL, { cleanup: { type: 'finalize', target: writableStream } });
 
+	// 4. Return access to writable handle
 	return ({
 		createWritable: async (options) => {
 			if ( options === undefined )
@@ -60,8 +87,7 @@ export async function showSaveFilePicker_sw(options) {
 export default showSaveFilePicker_sw;
 
 
-
-/* Utility Functions */
+/* Application-specific Utility Functions */
 
 const elementLoaded = new WeakMap();
 
@@ -84,81 +110,6 @@ async function ensureHelper() {
 	})();
 	await elementLoaded.get(frame);
 	return frame.contentWindow;
-}
-
-
-export async function resolve_active_reg(reg) {
-	// we don't care about this coarse 3-state approximation; sw.state is strictly better
-	const sw = reg.active || reg.waiting || reg.installing;
-
-	// synchronous resolution on existing state
-	if ( sw.state === 'activated' )
-		return sw;
-	if ( sw.state === 'redundant' )
-		throw new Error('serviceWorker was replaced, probably by an upgrade.');
-
-	// asynchronous resolution on future state
-	return await new Promise((resolve, reject) => {
-		const still_listening = new AbortController(); // clean up our eventListener when this Promise settles
-		resolve = ((c, f) => (x) => {f(x); c.abort();})(still_listening, resolve);
-		reject = ((c, f) => (x) => {f(x); c.abort();})(still_listening, reject);
-		sw.addEventListener('statechange', (event) => {
-			switch (event.target.state) {
-				case 'parsed':
-				case 'installing':
-					reject(new Error('unreachable'));
-					break;
-				case 'installed':
-				case 'activating':
-					break;
-				case 'activated':
-					resolve(event.target);
-					break;
-				case 'redundant':
-					reject(new Error('serviceWorker was replaced, probably by an upgrade.', { cause: event }));
-					break;
-			}
-		}, { signal: still_listening.signal });
-	});
-}
-
-
-const frameRegistry = new FinalizationRegistry((frame) => {frame.parentNode.removeChild(frame);});
-
-async function beginDownload(u, options) {
-	// Reliably downloads a (Content-Disposition: attachment) file without requiring transient user activation
-	if ( options === undefined )
-		options = {};
-	const frame = document.createElement('iframe');
-	frame.src = `data:text/html,${((document) => encodeURIComponent(new XMLSerializer().serializeToString(document)))((() => {
-		const document = new Document().implementation.createHTMLDocument();
-		const meta = document.createElement('meta');
-		meta.setAttribute('http-equiv', 'refresh');
-		meta.setAttribute('content', `0;url=${u}`);
-		document.head.appendChild(meta);
-		return document;
-	})())}`;
-	frame.hidden = true;
-	document.body.appendChild(frame);
-	if ( options.finalizationTarget !== undefined )
-		frameRegistry.register(options.finalizationTarget, frame);
-	else
-		console.warn("Memory leak: %o will never be freed; to fix this, pass a finalizationTarget to beginDownload()", frame);
-	return new Promise((resolve, reject) => {
-		frame.addEventListener('load', (event) => {
-			resolve({ type: 'event', value: event });
-			// do NOT call removeChild(frame) in this function!
-		});
-		// we SHOULD block the function from resolving until the file save prompt has actually been shown and the user has selected a file,
-		// but doing so currently creates a DEADLOCK as the current version of Firefox doesn't seem to prompt the file save until the stream starts getting data.
-		// To work around this for now, we make this thing resolve after a very brief moment no matter what.
-		// Need to do future troubleshooting --
-		// Hypothesis 1: Firefox generally refuses to prompt any file save until the first body byte has arrived
-		// Hypothesis 2: Firefox specifically refuses to send the headers for respondWith(ReadableStream) until the first nontrivial has arrived
-		setTimeout(() => {
-			resolve({ type: 'timeout', value: undefined });
-		}, DELAY_X_SHORT);
-	});
 }
 
 
@@ -186,32 +137,130 @@ export async function ensureServiceWorker() {
 	return sw;
 }
 
+
 export async function helper_onmessage(event) {
 	const message = event.data;
 	switch (message.command) {
-		case 'stream_to_url':
+		case 'port_to_url':
 			{
 				const originalOrigin = event.origin;
-				const replyPort = message.replyPort;
+				const port = message.port;
 
-				const readableStream = message.readableStream;
-				if ( !(readableStream instanceof ReadableStream) )
-					throw new TypeError('readableStream must be a ReadableStream.', { cause: { type: Object.getPrototypeOf(readableStream).constructor.name } });
+				if ( !(port instanceof MessagePort) ) {
+					console.error(new TypeError("port must be a MessagePort", { cause: { value: port, cause: event } }));
+					return;
+				}
 
 				const suggestedName = message.suggestedName;
-				if ( typeof suggestedName !== 'string' && typeof suggestedName !== 'undefined' )
-					throw new TypeError('suggestedName must be a string or undefined.');
+				if ( typeof suggestedName !== 'string' && typeof suggestedName !== 'undefined' ) {
+					port.postMessage({ error: 'suggestedName must be a string or undefined.' });
+					port.close();
+					return;
+				}
 
 				sw.postMessage({
-					command: 'stream_to_url',
-					replyPort,
+					command: 'port_to_url',
+					port,
 					originalOrigin,
 					suggestedName,
-					readableStream
-				}, { transfer: [replyPort, readableStream] });
+				}, { transfer: [port] });
 			}
 			break;
 	}
+}
+
+
+
+/* Pure Utility Functions */
+
+export async function resolve_active_reg(reg) {
+	// we don't care about this coarse 3-state approximation; sw.state is strictly better
+	const sw = reg.active || reg.waiting || reg.installing;
+
+	// synchronous resolution on existing state
+	if ( sw.state === 'activated' )
+		return sw;
+	if ( sw.state === 'redundant' )
+		throw new Error('serviceWorker was replaced, probably by an upgrade.');
+
+	// asynchronous resolution on future state
+	return await new Promise((resolve, reject) => {
+		const still_listening = new AbortController(); // clean up our eventListener when this Promise settles
+		resolve = ((c, f) => (x) => {f(x); c.abort();})(still_listening, resolve);
+		reject = ((c, f) => (x) => {f(x); c.abort();})(still_listening, reject);
+		sw.addEventListener('statechange', (event) => {
+			switch (event.target.state) {
+				case 'parsed':
+				case 'installing':
+					reject(new Error('unreachable', { cause: { state: event.target.state, type: event.type } }));
+					break;
+				case 'installed':
+				case 'activating':
+					break;
+				case 'activated':
+					resolve(event.target);
+					break;
+				case 'redundant':
+					reject(new Error('serviceWorker was replaced, probably by an upgrade.'));
+					break;
+			}
+		}, { signal: still_listening.signal });
+	});
+}
+
+
+const downloadFrameRegistry = new FinalizationRegistry((frame) => {frame.parentNode.removeChild(frame);});
+
+async function beginDownload(u, options) {
+	// Reliably downloads a (Content-Disposition: attachment) file without requiring transient user activation
+
+	// 1. Create frame
+	if ( options === undefined )
+		options = {};
+	const frame = document.createElement('iframe');
+	frame.src = `data:text/html,${((document) => encodeURIComponent(new XMLSerializer().serializeToString(document)))((() => {
+		const document = new Document().implementation.createHTMLDocument();
+		const meta = document.createElement('meta');
+		meta.setAttribute('http-equiv', 'refresh');
+		meta.setAttribute('content', `0;url=${u}`);
+		document.head.appendChild(meta);
+		return document;
+	})())}`;
+	frame.hidden = true;
+	if ( options.cleanup ) {
+		switch ( options.cleanup.type ) {
+			case 'finalize':
+				downloadFrameRegistry.register(options.cleanup.target, frame);
+				break;
+			case 'settled':
+				Promise.resolve(options.cleanup.promise).finally(() => {frame.parentNode.removeChild(frame);});
+				break;
+			default:
+				throw new Error("unreachable", { cause: { 'function': beginDownload, 'arguments': arguments } });
+		}
+	} else {
+		console.warn("Memory leak: %o will never be freed; to fix this, pass a cleanup parameter to beginDownload()", frame);
+	}
+
+	// 2. Begin download
+	document.body.appendChild(frame);
+
+	// 3. Create promise to wait for download to have begun
+	return new Promise((resolve, reject) => {
+		frame.addEventListener('load', (event) => {
+			resolve({ type: 'event', value: event });
+			// do NOT call removeChild(frame) in this function; it will kill the download. Use a finalizationTarget for cleanup instead.
+		});
+		// we SHOULD block the function from resolving until the file save prompt has actually been shown or, ideally, until the user has selected a file,
+		// but doing so currently creates a DEADLOCK as the current version of Firefox doesn't seem to prompt the file save until the stream starts getting data.
+		// To work around this for now, we make this thing resolve after a very brief moment no matter what.
+		// Need to do future troubleshooting --
+		// Hypothesis 1: Firefox generally refuses to prompt any file save until the first body byte has arrived
+		// Hypothesis 2: Firefox specifically refuses to send the headers for respondWith(ReadableStream) until the first nontrivial has arrived
+		setTimeout(() => {
+			resolve({ type: 'timeout', value: undefined });
+		}, DELAY_X_SHORT);
+	});
 }
 
 

@@ -38,7 +38,7 @@ class FooController {
 		try_else: {
 			try {
 				view.startPending(event.type);
-				const options = this.#parseOptions(event.target.options);
+				const options = this.#parseOptions(event.options);
 				await this.#model[event.type](options);
 			} catch (error) {
 				console.error(error);
@@ -159,12 +159,6 @@ let controller = new FooController(
 );
 
 </script>
-<form action="javascript:alert(new Error('unreachable'));">
-<input type="hidden" name="mimeType" value="audio/webm;codecs=%22opus%22" />
-<button type="submit" name="record">&#x23fa;</button>
-<button type="submit" name="resume" disabled>&#x25b6;</button>
-<button type="submit" name="pause" disabled>&#x23f8;</button>
-<button type="submit" name="stop" disabled>&#x23f9;</button>
-</form>
+<form action="javascript:alert(new Error('unreachable'));"><input type="hidden" name="mimeType" value="audio/webm;codecs=&quot;opus&quot;" /><button type="submit" name="record">&#x23fa;&#xfe0e;</button><button type="submit" name="resume" disabled>&#x25b6;&#xfe0e;</button><button type="submit" name="pause" disabled>&#x23f8;&#xfe0e;</button><button type="submit" name="stop" disabled>&#x23f9;&#xfe0e;</button></form>
 </body>
 </html>
