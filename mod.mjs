@@ -39,6 +39,7 @@ export async function showSaveFilePicker_sw(options) {
 				helper.postMessage({
 					command: 'port_to_url',
 					suggestedName: options.suggestedName,
+					mimeType: options.mimeType.split(';')[0],
 					port: port2
 				}, { transfer: [port2], targetOrigin: new URL(import.meta.url).origin });
 				await ready;
@@ -178,12 +179,20 @@ export async function helper_onmessage(event) {
 					return;
 				}
 
+				const mimeType = message.mimeType;
+				if ( typeof mimeType !== 'string' && typeof mimeType !== 'undefined' ) {
+					port.postMessage({ error: 'mimeType must be a string or undefined.' });
+					port.close();
+					return;
+				}
+
 				console.debug("%o \u2192 %o", port, sw);
 				sw.postMessage({
 					command: 'port_to_url',
 					port,
 					originalOrigin,
 					suggestedName,
+					mimeType
 				}, { transfer: [port] });
 			}
 			break;

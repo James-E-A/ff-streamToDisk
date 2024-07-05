@@ -143,6 +143,7 @@ class FooController {
 	#model;
 	#view;
 	constructor(model, view) {
+		super();
 		this.#model = model;
 		this.#view = view;
 
@@ -150,7 +151,7 @@ class FooController {
 			this.#view.state = 'pending';
 			const detail = event.detail;
 			try {
-				let suggestedName = (detail.filename !== undefined) ? detail.filename : `Recording_${makeFilenameSafe(new Date())}`;
+				let suggestedName = (detail.filename !== undefined) ? detail.filename : `Recording_${makeFilenameSafe(new Date())}.weba`;
 				let mimeType = detail.mimeType;
 				await this.#model.startRecording({
 					mediaRecorderOpts: { mimeType },
