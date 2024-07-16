@@ -88,7 +88,7 @@ class FooModel {
 					};
 					// It's important QoL to start this immediately
 					// lest we lose important audio while waiting for the user to choose a file
-					recorder.start(1000);
+					recorder.start(5*1000);
 				},
 				//pull: (controller) => {
 				//	recorder.requestData();
